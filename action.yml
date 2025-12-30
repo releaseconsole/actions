@@ -1,0 +1,184 @@
+name: Releaseconsole Actions
+description: Ingest build, deploy and commit data into Releaseconsole with minimal configuration
+
+inputs:
+  token:
+    description: Releaseconsole API token
+    required: true
+
+  type:
+    description: build | deploy | commit
+    required: true
+
+  project_name:
+    required: true
+
+  team_name:
+    required: true
+
+  version:
+    required: false
+
+  status:
+    required: false
+    default: RUNNING
+
+  branch_name:
+    required: false
+
+  environment_name:
+    required: false
+
+  site_name:
+    required: false
+
+  web_url:
+    required: false
+
+runs:
+  using: composite
+  steps:
+    # 1. Repo'yu HER ZAMAN kendimiz çekiyoruz
+    - name: Checkout repository (full history)
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # 2. Ingest logic
+    - name: Releaseconsole ingest
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        TYPE: ${{ inputs.type }}
+        PROJECT_NAME: ${{ inputs.project_name }}
+        TEAM_NAME: ${{ inputs.team_name }}
+        VERSION: ${{ inputs.version }}
+        STATUS: ${{ inputs.status }}
+        BRANCH_NAME: ${{ inputs.branch_name }}
+        ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+        SITE_NAME: ${{ inputs.site_name }}
+        WEB_URL: ${{ inputs.web_url }}
+        PLATFORM_URL: https://dev.releaseconsole.com
+      run: |
+        set -euo pipefail
+
+        api_post() {
+          curl -sS -X POST "$PLATFORM_URL/api/ingest/" \
+            -H "Authorization: Token $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$1"
+        }
+
+        case "$TYPE" in
+          build)
+            if [ -z "${VERSION:-}" ]; then
+              echo "ERROR: version is required for build ingestion"
+              exit 1
+            fi
+
+            payload=$(jq -n \
+              --arg type "build" \
+              --arg project "$PROJECT_NAME" \
+              --arg team "$TEAM_NAME" \
+              --arg version "$VERSION" \
+              --arg branch "${BRANCH_NAME:-$GITHUB_REF_NAME}" \
+              --arg status "$STATUS" \
+              --arg web_url "$WEB_URL" \
+              '{
+                type: $type,
+                project_name: $project,
+                team_name: $team,
+                version: $version,
+                branch_name: $branch,
+                status: $status
+              } + ( $web_url | length > 0 ? { web_url: $web_url } : {} )')
+
+            api_post "$payload"
+            ;;
+
+          deploy)
+            if [ -z "${VERSION:-}" ] || [ -z "${ENVIRONMENT_NAME:-}" ] || [ -z "${SITE_NAME:-}" ]; then
+              echo "ERROR: version, environment_name and site_name are required for deploy ingestion"
+              exit 1
+            fi
+
+            payload=$(jq -n \
+              --arg type "deploy" \
+              --arg project "$PROJECT_NAME" \
+              --arg team "$TEAM_NAME" \
+              --arg version "$VERSION" \
+              --arg env "$ENVIRONMENT_NAME" \
+              --arg site "$SITE_NAME" \
+              --arg status "$STATUS" \
+              --arg web_url "$WEB_URL" \
+              '{
+                type: $type,
+                project_name: $project,
+                team_name: $team,
+                version: $version,
+                environment_name: $env,
+                site_name: $site,
+                status: $status
+              } + ( $web_url | length > 0 ? { web_url: $web_url } : {} )')
+
+            api_post "$payload"
+            ;;
+
+          commit)
+            if [ -z "${VERSION:-}" ]; then
+              echo "ERROR: version is required for commit ingestion"
+              exit 1
+            fi
+
+            BEFORE="${GITHUB_EVENT_BEFORE:-}"
+            AFTER="${GITHUB_SHA}"
+
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              RANGE="$AFTER"
+            else
+              RANGE="$BEFORE..$AFTER"
+            fi
+
+            COMMITS=$(git log $RANGE --pretty=format:'%H|%s|%ae|%cI' || true)
+
+            if [ -z "$COMMITS" ]; then
+              echo "No commits found in range $RANGE"
+              exit 0
+            fi
+
+            echo "$COMMITS" | while IFS='|' read -r sha message author committed_at; do
+              [ -z "$sha" ] && continue
+
+              ticket_key=$(echo "$message" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)
+              esc_msg=$(echo "$message" | sed 's/"/\\"/g')
+
+              payload=$(jq -n \
+                --arg type "commit" \
+                --arg sha "$sha" \
+                --arg msg "$esc_msg" \
+                --arg author "$author" \
+                --arg committed_at "$committed_at" \
+                --arg ticket "$ticket_key" \
+                --arg version "$VERSION" \
+                --arg project "$PROJECT_NAME" \
+                --arg team "$TEAM_NAME" \
+                '{
+                  type: $type,
+                  sha: $sha,
+                  message: $msg,
+                  author: $author,
+                  committed_at: $committed_at,
+                  build_version: $version,
+                  project_name: $project,
+                  team_name: $team
+                } + ( $ticket | length > 0 ? { ticket_key: $ticket } : {} )')
+
+              api_post "$payload"
+            done
+            ;;
+
+          *)
+            echo "ERROR: unsupported type: $TYPE"
+            exit 1
+            ;;
+        esac
