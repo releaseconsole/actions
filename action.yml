@@ -128,7 +128,6 @@ runs:
               RANGE="$BEFORE..$AFTER"
             fi
 
-            # Tab ayırıcı kullanarak commit mesajı içindeki özel karakterlerden kaçınıldı
             COMMITS=$(git log $RANGE --pretty=format:'%H%x09%s%x09%ae%x09%cI' || true)
 
             if [ -z "$COMMITS" ]; then
@@ -138,9 +137,8 @@ runs:
 
             echo "$COMMITS" | while IFS=$'\t' read -r sha message author committed_at; do
               [ -z "$sha" ] && continue
-
               ticket_key=$(echo "$message" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)
-
+              
               payload=$(jq -n \
                 --arg type "commit" \
                 --arg sha "$sha" \
