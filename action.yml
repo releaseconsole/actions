@@ -5,46 +5,35 @@ inputs:
   token:
     description: Releaseconsole API token
     required: true
-
   type:
     description: build | deploy | commit
     required: true
-
   project_name:
     required: true
-
   team_name:
     required: true
-
   version:
     required: false
-
   status:
     required: false
     default: RUNNING
-
   branch_name:
     required: false
-
   environment_name:
     required: false
-
   site_name:
     required: false
-
   web_url:
     required: false
 
 runs:
   using: composite
   steps:
-    # 1. Repo'yu HER ZAMAN kendimiz çekiyoruz
     - name: Checkout repository (full history)
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    # 2. Ingest logic
     - name: Releaseconsole ingest
       shell: bash
       env:
@@ -91,7 +80,7 @@ runs:
                 version: $version,
                 branch_name: $branch,
                 status: $status
-              } + ( $web_url | length > 0 ? { web_url: $web_url } : {} )')
+              } + (if $web_url | length > 0 then { web_url: $web_url } else {} end)')
 
             api_post "$payload"
             ;;
@@ -119,7 +108,7 @@ runs:
                 environment_name: $env,
                 site_name: $site,
                 status: $status
-              } + ( $web_url | length > 0 ? { web_url: $web_url } : {} )')
+              } + (if $web_url | length > 0 then { web_url: $web_url } else {} end)')
 
             api_post "$payload"
             ;;
@@ -134,28 +123,28 @@ runs:
             AFTER="${GITHUB_SHA}"
 
             if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-              RANGE="$AFTER"
+              RANGE="-1 $AFTER"
             else
               RANGE="$BEFORE..$AFTER"
             fi
 
-            COMMITS=$(git log $RANGE --pretty=format:'%H|%s|%ae|%cI' || true)
+            # Tab ayırıcı kullanarak commit mesajı içindeki özel karakterlerden kaçınıldı
+            COMMITS=$(git log $RANGE --pretty=format:'%H%x09%s%x09%ae%x09%cI' || true)
 
             if [ -z "$COMMITS" ]; then
               echo "No commits found in range $RANGE"
               exit 0
             fi
 
-            echo "$COMMITS" | while IFS='|' read -r sha message author committed_at; do
+            echo "$COMMITS" | while IFS=$'\t' read -r sha message author committed_at; do
               [ -z "$sha" ] && continue
 
               ticket_key=$(echo "$message" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)
-              esc_msg=$(echo "$message" | sed 's/"/\\"/g')
 
               payload=$(jq -n \
                 --arg type "commit" \
                 --arg sha "$sha" \
-                --arg msg "$esc_msg" \
+                --arg msg "$message" \
                 --arg author "$author" \
                 --arg committed_at "$committed_at" \
                 --arg ticket "$ticket_key" \
@@ -171,7 +160,7 @@ runs:
                   build_version: $version,
                   project_name: $project,
                   team_name: $team
-                } + ( $ticket | length > 0 ? { ticket_key: $ticket } : {} )')
+                } + (if $ticket | length > 0 then { ticket_key: $ticket } else {} end)')
 
               api_post "$payload"
             done
